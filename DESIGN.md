@@ -11,11 +11,18 @@ src/
 │   ├── search-countries.ts      fetch, response.ok, 404 → [], таймаут, HttpError
 │   ├── http-error.ts            class HttpError extends Error { status }
 │   ├── map-country-response.ts  чистый маппинг ответа API → данные карточки
-│   └── classify-error.ts        AbortError / TimeoutError / HttpError / 404 / сеть
-├── core/search-controller.ts    состояние поиска, отмена, retry — без DOM
+│   ├── classify-error.ts        AbortError / TimeoutError / HttpError / 404 / сеть
+│   └── cached-search.ts         бонус: LRU-кэш + дедупликация запросов в полёте
+├── core/
+│   ├── search-controller.ts     состояние поиска, отмена, retry, searchNow — без DOM
+│   └── search-history.ts        бонус: история поиска, хранилище внедряется снаружи
 ├── ui/                          отрисовка; единственное место, где есть DOM
 └── main.ts
 ```
+
+В приложении контроллер получает не голый `searchCountries`, а обёртку
+`createCachedSearch(searchCountries)` ([ui/app.ts](src/ui/app.ts)). Контроллер об этом не знает:
+у обеих функций одинаковая сигнатура `(query, signal) => Promise<Country[]>`.
 
 Слои `utils`, `api` и `core` не используют DOM и тестируются в Node без браузера и без сети (`fetch` подменяется моком).
 
@@ -144,27 +151,75 @@ input event
 
 ### Остальное
 
-| Операция                        | Время | Почему                                                    |
-| ------------------------------- | ----- | --------------------------------------------------------- |
-| вызов `debounce`                | O(1)  | `clearTimeout` + `setTimeout`                             |
-| `classifyError`, `isAbortError` | O(1)  | фиксированный набор проверок                              |
-| `controller.setQuery`           | O(1)  | `abort()`, установка состояния, перезапуск таймера        |
-| отрисовка результатов           | O(n)  | одна карточка на страну, `replaceChildren` за один проход |
+### Кэш и дедупликация (бонус)
+
+[cached-search.ts](src/api/cached-search.ts). Обозначения: `L` — длина запроса, `M` — размер
+кэша (`maxEntries`, по умолчанию 100), `n · k` — размер одного ответа (см. выше).
+
+Устройство:
+
+- `cache: Map<key, Country[]>` хранит готовые результаты. `Map` помнит порядок вставки, поэтому LRU
+  получается без отдельного списка: при обращении запись удаляется и вставляется заново (уходит в
+  конец), а при переполнении удаляется первая (`cache.keys().next()`), то есть самая давняя.
+- `inFlight: Map<key, { promise, controller, waiting }>` хранит запросы в полёте. Повторный вызов с
+  тем же ключом не создаёт новый запрос, а увеличивает `waiting` и ждёт тот же `promise`.
+- Каждый вызывающий получает свою обёртку `waitWithSignal(promise, signal)`. Если его сигнал
+  отменён, отклоняется только эта обёртка, а `waiting` уменьшается. Общий запрос отменяется
+  (`controller.abort()`) только при `waiting === 0`, когда его больше никто не ждёт.
+- Ошибки не кэшируются: результат записывается только в ветке успеха, а запись в `inFlight`
+  удаляется при любом исходе.
+
+| Операция                                  | Время | Почему                                                           |
+| ----------------------------------------- | ----- | ---------------------------------------------------------------- |
+| построение ключа (`trim().toLowerCase()`) | O(L)  | один проход по строке                                            |
+| попадание в кэш                           | O(L)  | ключ O(L) + `Map.get`, `delete`, `set` за O(1) в среднем         |
+| промах: старт нового запроса              | O(L)  | ключ + `Map.set` O(1); сеть в оценку не входит                   |
+| присоединение к запросу в полёте          | O(L)  | ключ + `Map.get` O(1) + `waiting += 1` + `addEventListener` O(1) |
+| сохранение ответа и вытеснение LRU        | O(1)  | `delete`, `set`, `keys().next()` — без перебора                  |
+| отмена одного вызывающего                 | O(1)  | `waiting -= 1`; при нуле `abort()` и `Map.delete`                |
+
+Без `Map` (например, с массивом пар) поиск в кэше и вытеснение стоили бы O(M) на каждый вызов.
+
+**Память:** O(M · n · k) на кэш. Без ограничения `M` кэш рос бы с каждым новым запросом до
+закрытия вкладки, поэтому размер ограничен. Результат хранится один раз, и все вызывающие получают
+ссылку на один и тот же массив без копирования: UI его не изменяет. `inFlight` содержит не больше
+записей, чем различных запросов одновременно в полёте; контроллер держит один активный запрос,
+поэтому на практике это 0–1 записей.
+
+### История поиска (бонус)
+
+[search-history.ts](src/core/search-history.ts). `h` — длина истории (не больше `limit` = 10).
+
+- `addToHistory`: O(h · L). Один `filter` по истории со сравнением строк без учёта регистра плюс
+  `slice`. Поскольку `h ≤ 10`, на практике O(L).
+- Сохранение: `JSON.stringify` и `localStorage.setItem`, O(h · L).
+- Загрузка: один раз при старте, `JSON.parse` и `filter`, O(h · L).
+
+### Остальное
+
+| Операция                           | Время | Почему                                                    |
+| ---------------------------------- | ----- | --------------------------------------------------------- |
+| вызов `debounce`                   | O(1)  | `clearTimeout` + `setTimeout`                             |
+| `classifyError`, `isAbortError`    | O(1)  | фиксированный набор проверок                              |
+| `controller.setQuery`, `searchNow` | O(1)  | `abort()`, установка состояния, перезапуск таймера        |
+| отрисовка результатов              | O(n)  | одна карточка на страну, `replaceChildren` за один проход |
 
 ---
 
 ## 4. Принципы чистого кода
 
-| Принцип                                                      | Где                                                                                                                                                                                                                                                                       |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Single Responsibility.** Один модуль отвечает за одно дело | `search-countries.ts` — только HTTP; `map-country-response.ts` — только маппинг; `classify-error.ts` — только классификация ошибок; `search-controller.ts` — только состояние и отмена; `ui/*` — только DOM                                                               |
-| **Separation of concerns, логика без DOM**                   | `utils/`, `api/`, `core/` не трогают `document`. Связь с DOM только в [`ui/app.ts`](src/ui/app.ts): событие `input` → `controller.setQuery`, а `onChange` → `render`                                                                                                      |
-| **Dependency Injection**                                     | `createSearchController({ search, debounceMs, onChange })`: функция поиска передаётся снаружи. В тестах подменяется управляемой заглушкой, а для кэша её можно обернуть, не трогая контроллер                                                                             |
-| **Чистые функции**                                           | `mapCountryResponse`, `classifyError`, `describeCountry` и `formatArea` в [`ui/format.ts`](src/ui/format.ts): без побочных эффектов, результат зависит только от аргументов                                                                                               |
-| **Невалидные состояния невыразимы** (discriminated union)    | `SearchState` в [search-controller.ts](src/core/search-controller.ts): `countries` есть только у `success`, `message` только у `error`. Интерфейс не может показать список во время загрузки                                                                              |
-| **Явные ошибки вместо «тихих»**                              | `HttpError` хранит `status`, `response.ok` проверяется вручную ([search-countries.ts](src/api/search-countries.ts))                                                                                                                                                       |
-| **Без магических чисел и строк**                             | `HTTP_NOT_FOUND`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_DEBOUNCE_MS`, `API_URL`                                                                                                                                                                                                  |
-| **DRY**                                                      | `el()` в [`ui/dom.ts`](src/ui/dom.ts) — одно место создания элементов; `realError()` в [classify-error.ts](src/api/classify-error.ts); `renderFlag` переиспользуется в карточке и в окне подробностей; моки в [`test-utils/`](src/test-utils/) общие для всех тестов      |
-| **Говорящие имена и маленькие функции**                      | `abortActiveRequest`, `isAbortError`, `showToUser`, `retryable`; `mapCountry` и `formatCurrency` по несколько строк                                                                                                                                                       |
-| **Безопасность через API, а не через дисциплину**            | Нет `innerHTML`: `el()` пишет только через `textContent` и `setAttribute`. Правило `no-restricted-properties` в [eslint.config.js](eslint.config.js) запрещает `innerHTML`, `outerHTML` и `insertAdjacentHTML` на уровне линтера                                          |
-| **Тесты по FIRST**                                           | Fast: фейковые таймеры, без реальной сети. Independent: каждый тест сам создаёт моки, `vi.unstubAllGlobals()` в `afterEach`. Repeatable: нет зависимости от API и времени. Self-validating: только `expect`. Timely: тест коммитится до реализации (см. историю коммитов) |
+| Принцип                                                      | Где                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Single Responsibility.** Один модуль отвечает за одно дело | `search-countries.ts` — только HTTP; `map-country-response.ts` — только маппинг; `classify-error.ts` — только классификация ошибок; `search-controller.ts` — только состояние и отмена; `cached-search.ts` — только кэш и дедупликация; `search-history.ts` — только история; `ui/*` — только DOM                                        |
+| **Separation of concerns, логика без DOM**                   | `utils/`, `api/`, `core/` не трогают `document`. Связь с DOM только в [`ui/app.ts`](src/ui/app.ts): событие `input` → `controller.setQuery`, а `onChange` → `render`                                                                                                                                                                     |
+| **Dependency Injection**                                     | `createSearchController({ search, debounceMs, onChange })`: функция поиска передаётся снаружи. В тестах подменяется управляемой заглушкой, а в приложении — обёрткой `createCachedSearch(searchCountries)`. `createHistoryStore(storage)` получает хранилище параметром: в приложении это `localStorage`, в тестах — заменитель в памяти |
+| **Open/Closed, декоратор**                                   | Кэш и дедупликация добавлены обёрткой [`createCachedSearch`](src/api/cached-search.ts) с той же сигнатурой, что у `searchCountries`. Ни `searchCountries`, ни контроллер для этого не менялись                                                                                                                                           |
+| **Устойчивость к сбоям окружения**                           | [`createHistoryStore`](src/core/search-history.ts): ошибки `localStorage` (приватный режим, переполнение) и испорченный JSON не ломают приложение — история продолжает жить в памяти                                                                                                                                                     |
+| **Чистые функции**                                           | `mapCountryResponse`, `classifyError`, `addToHistory`, `describeCountry` и `formatArea` в [`ui/format.ts`](src/ui/format.ts): без побочных эффектов, результат зависит только от аргументов                                                                                                                                              |
+| **Невалидные состояния невыразимы** (discriminated union)    | `SearchState` в [search-controller.ts](src/core/search-controller.ts): `countries` есть только у `success`, `message` только у `error`. Интерфейс не может показать список во время загрузки                                                                                                                                             |
+| **Явные ошибки вместо «тихих»**                              | `HttpError` хранит `status`, `response.ok` проверяется вручную ([search-countries.ts](src/api/search-countries.ts))                                                                                                                                                                                                                      |
+| **Без магических чисел и строк**                             | `HTTP_NOT_FOUND`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_DEBOUNCE_MS`, `API_URL`, `DEFAULT_CACHE_SIZE`, `DEFAULT_HISTORY_LIMIT`, `HISTORY_STORAGE_KEY`                                                                                                                                                                                           |
+| **DRY**                                                      | `el()` в [`ui/dom.ts`](src/ui/dom.ts) — одно место создания элементов; `realError()` в [classify-error.ts](src/api/classify-error.ts); `renderFlag` переиспользуется в карточке и в окне подробностей; моки в [`test-utils/`](src/test-utils/) общие для всех тестов                                                                     |
+| **Говорящие имена и маленькие функции**                      | `abortActiveRequest`, `isAbortError`, `showToUser`, `retryable`, `waitWithSignal`, `acceptQuery`; `mapCountry` и `formatCurrency` по несколько строк                                                                                                                                                                                     |
+| **Безопасность через API, а не через дисциплину**            | Нет `innerHTML`: `el()` пишет только через `textContent` и `setAttribute`. Правило `no-restricted-properties` в [eslint.config.js](eslint.config.js) запрещает `innerHTML`, `outerHTML` и `insertAdjacentHTML` на уровне линтера                                                                                                         |
+| **Тесты по FIRST**                                           | Fast: фейковые таймеры, без реальной сети. Independent: каждый тест сам создаёт моки, `vi.unstubAllGlobals()` в `afterEach`. Repeatable: нет зависимости от API и времени. Self-validating: только `expect`. Timely: тест коммитится до реализации (см. историю коммитов)                                                                |
