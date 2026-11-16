@@ -236,6 +236,61 @@ describe('createSearchController', () => {
     });
   });
 
+  describe('searchNow (e.g. a click on a history item)', () => {
+    it('searches immediately, without waiting for the debounce', () => {
+      const { controller, search } = setup();
+
+      controller.searchNow('spain');
+
+      expect(controller.getState()).toEqual({ status: 'loading', query: 'spain' });
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(search).toHaveBeenCalledWith('spain', expect.any(AbortSignal));
+    });
+
+    it('aborts the request in flight', async () => {
+      const { controller, call } = setup();
+
+      controller.setQuery('france');
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS);
+      controller.searchNow('spain');
+
+      expect(call(0).signal.aborted).toBe(true);
+      expect(call(1).signal.aborted).toBe(false);
+    });
+
+    it('cancels a pending debounced search', async () => {
+      const { controller, search } = setup();
+
+      controller.setQuery('france');
+      controller.searchNow('spain');
+      await vi.advanceTimersByTimeAsync(DEBOUNCE_MS);
+
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(search).toHaveBeenCalledWith('spain', expect.any(AbortSignal));
+    });
+
+    it('becomes the query that retry() repeats', async () => {
+      const { controller, call, search } = setup();
+
+      controller.searchNow('spain');
+      call(0).reject(new HttpError(500));
+      await flush();
+      controller.retry();
+
+      expect(search).toHaveBeenCalledTimes(2);
+      expect(call(1).query).toBe('spain');
+    });
+
+    it('goes idle without a request for an empty query', () => {
+      const { controller, search } = setup();
+
+      controller.searchNow('  ');
+
+      expect(search).not.toHaveBeenCalled();
+      expect(controller.getState()).toEqual({ status: 'idle' });
+    });
+  });
+
   describe('onChange', () => {
     it('is called with every new state', async () => {
       const { controller, call, onChange } = setup();
