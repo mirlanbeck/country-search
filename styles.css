@@ -94,6 +94,65 @@ body {
   border-color: var(--accent);
 }
 
+/* History */
+
+.history-slot {
+  min-height: 8px;
+}
+
+.history {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.history__label {
+  font-size: 0.9rem;
+  color: var(--muted);
+}
+
+.history__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history__item,
+.history__clear {
+  padding: 4px 12px;
+  font: inherit;
+  font-size: 0.9rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.history__item {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.history__item:hover,
+.history__item:focus-visible {
+  border-color: var(--accent);
+}
+
+.history__clear {
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  text-decoration: underline;
+}
+
+.history__clear:hover {
+  color: var(--text);
+}
+
 /* Status: each state looks different */
 
 .status-slot {
