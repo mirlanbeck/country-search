@@ -29,6 +29,9 @@ export interface RawCountry {
   currencies?: RawCurrency[];
 }
 
+/** Any function that searches countries and honours an AbortSignal (real API, cached, mocked). */
+export type SearchFn = (query: string, signal: AbortSignal) => Promise<Country[]>;
+
 /** Data the UI needs to render a card and its detail view. */
 export interface Country {
   code: string;

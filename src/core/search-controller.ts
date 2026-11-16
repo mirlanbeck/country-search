@@ -1,6 +1,6 @@
 import { classifyError } from '../api/classify-error.js';
 import { DEFAULT_TIMEOUT_MS, searchCountries } from '../api/search-countries.js';
-import type { Country } from '../api/types.js';
+import type { Country, SearchFn } from '../api/types.js';
 import { debounce } from '../utils/debounce.js';
 
 export const DEFAULT_DEBOUNCE_MS = 300;
@@ -11,8 +11,6 @@ export type SearchState =
   | { status: 'success'; query: string; countries: Country[] }
   | { status: 'empty'; query: string }
   | { status: 'error'; query: string; message: string; retryable: boolean };
-
-export type SearchFn = (query: string, signal: AbortSignal) => Promise<Country[]>;
 
 export interface SearchControllerOptions {
   search?: SearchFn;
