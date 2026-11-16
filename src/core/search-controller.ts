@@ -21,6 +21,8 @@ export interface SearchControllerOptions {
 export interface SearchController {
   /** Call on every input change. Aborts the request in flight right away. */
   setQuery(rawQuery: string): void;
+  /** Searches right away, skipping the debounce (e.g. a click on a history item). */
+  searchNow(rawQuery: string): void;
   /** Repeats the last entered query immediately. */
   retry(): void;
   getState(): SearchState;
@@ -83,20 +85,30 @@ export function createSearchController({
 
   const debouncedRun = debounce((query: string) => void run(query), debounceMs);
 
+  /** Shared start of every input: cancel what is running and remember the query. */
+  const acceptQuery = (rawQuery: string): string => {
+    const query = rawQuery.trim();
+    abortActiveRequest();
+    debouncedRun.cancel();
+    lastQuery = query;
+    if (query === '') setState({ status: 'idle' });
+    return query;
+  };
+
   return {
     setQuery(rawQuery) {
-      const query = rawQuery.trim();
-      abortActiveRequest();
-      lastQuery = query;
-
-      if (query === '') {
-        debouncedRun.cancel();
-        setState({ status: 'idle' });
-        return;
-      }
+      const query = acceptQuery(rawQuery);
+      if (query === '') return;
 
       setState({ status: 'loading', query });
       debouncedRun(query);
+    },
+
+    searchNow(rawQuery) {
+      const query = acceptQuery(rawQuery);
+      if (query === '') return;
+
+      void run(query);
     },
 
     retry() {
